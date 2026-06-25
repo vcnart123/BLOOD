@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>血壓 AI 記錄小幫手</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* 手機版優先的 UI 設計 */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f6f9;
+            margin: 0;
+            padding: 15px;
+            color: #333;
+        }
+        .container {
+            max-width: 480px; /* 限制最大寬度，符合手機版面 */
+            margin: 0 auto;
+            background: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        h2 { text-align: center; color: #2c3e50; margin-top: 0; }
+        
+        /* 區塊樣式 */
+        .section { margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
+        .section:last-child { border-bottom: none; }
+        
+        /* 拍照/上傳區塊 */
+        .upload-btn {
+            display: block; width: 100%; background: #3498db; color: white; 
+            text-align: center; padding: 12px; border-radius: 8px; font-size: 16px; 
+            font-weight: bold; cursor: pointer; box-sizing: border-box;
+        }
+        input[type="file"] { display: none; }
+        
+        /* 縮圖與輸入區塊同時呈現 (預設縮圖在上方，輸入在下方) */
+        #preview-container { text-align: center; margin-top: 15px; display: none; }
+        #preview-img { max-width: 100%; max-height: 200px; border-radius: 8px; border: 1px solid #ddd; }
+        #ocr-status { font-size: 14px; color: #e67e22; margin-top: 8px; font-weight: bold; }
+
+        /* 手動修改框 (縱向依序、寬度適中) */
+        .form-group {
+            display: flex; flex-direction: column; margin-top: 12px;
+        }
+        label { font-size: 14px; font-weight: bold; margin-bottom: 5px; color: #555; }
+        input {
+            width: 100%; max-width: 320px; /* 寬度適中 */
+            padding: 10px; font-size: 16px; border: 1px solid #ccc; 
+            border-radius: 6px; box-sizing: border-box;
+        }
+        input[type="datetime-local"] { width: 100%; max-width: 320px; }
+        
+        /* 送出按鈕 */
+        .submit-btn {
+            display: block; width: 100%; max-width: 320px; background: #2ecc71; 
+            color: white; border: none; padding: 12px; border-radius: 8px; 
+            font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 20px;
+        }
+        
+        /* 圖表區塊 */
+        canvas { max-width: 100%; height: 250px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>🩸 血壓記錄小幫手</h2>
+
+    <div class="section">
+        <label class="upload-btn">
+            📷 拍攝或上傳血壓機照片
+            <input type="file" accept="image/*" capture="environment" id="file-input">
+        </label>
+        
+        <div id="preview-container">
+            <img id="preview-img" alt="照片縮圖">
+            <div id="ocr-status">等待上傳照片...</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="form-group">
+            <label for="measure-time">量測時間 (年/月/日/點/分)</label>
+            <input type="datetime-local" id="measure-time" required>
+        </div>
+
+        <div class="form-group">
+            <label for="dia-input">舒張壓 (Diastolic)</label>
+            <input type="number" id="dia-input" list="dia-options" placeholder="例如: 80" required>
+            <datalist id="dia-options">
+                <option value="60"><option value="70"><option value="80"><option value="90">
+            </datalist>
+        </div>
+
+        <div class="form-group">
+            <label for="sys-input">收縮壓 (Systolic)</label>
+            <input type="number" id="sys-input" list="sys-options" placeholder="例如: 120" required>
+            <datalist id="sys-options">
+                <option value="100"><option value="110"><option value="120"><option value="130"><option value="140">
+            </datalist>
+        </div>
+
+        <div class="form-group">
+            <label for="pul-input">脈搏 (Pulse)</label>
+            <input type="number" id="pul-input" list="pul-options" placeholder="例如: 75" required>
+            <datalist id="pul-options">
+                <option value="60"><option value="70"><option value="80"><option value="90">
+            </datalist>
+        </div>
+
+        <button class="submit-btn" onclick="saveRecord()">💾 儲存紀錄</button>
+    </div>
+
+    <div class="section" style="border-bottom: none;">
+        <h3 style="text-align: center; color: #555; font-size: 16px;">📈 歷史趨勢圖</h3>
+        <canvas id="bpChart"></canvas>
+    </div>
+</div>
+
+<script>
+    // 預設資料儲存陣列
+    let records = JSON.parse(localStorage.getItem('bp_records')) || [];
+    let bpChartInstance = null;
+
+    // 處理檔案上傳、縮圖與時間設定
+    document.getElementById('file-input').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // 產生縮圖
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            document.getElementById('preview-img').src = event.target.result;
+            document.getElementById('preview-container').style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+
+        // 4: 用上傳照片的時間當成量測時間
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById('measure-time').value = now.toISOString().slice(0, 16);
+
+        // 執行 AI 辨識
+        recognizeImage(file);
+    });
+
+    // 3 & 6: AI 影像辨識 (優先辨識數字並套入欄位)
+    async function recognizeImage(file) {
+        const statusDiv = document.getElementById('ocr-status');
+        statusDiv.innerText = '⚙️ AI 正在辨識數字，請稍候...';
+        statusDiv.style.color = '#3498db';
+
+        try {
+            const worker = await Tesseract.createWorker('eng');
+            // 設定只辨識數字，提高準確率
+            await worker.setParameters({
+                tessedit_char_whitelist: '0123456789\n ',
+            });
+            const { data: { text } } = await worker.recognize(file);
+            await worker.terminate();
+
+            // 抓取所有數字陣列
+            const numbers = text.match(/\d+/g);
+            
+            if (numbers && numbers.length >= 3) {
+                // 血壓機通常顯示順序：收縮壓(大數字) -> 舒張壓(小數字) -> 脈搏
+                // 我們抓前三個最明顯的數字來假設
+                let sys = numbers[0];
+                let dia = numbers[1];
+                let pul = numbers[2];
+
+                // 依照你的要求：套入修改框 (舒張壓、收縮壓、脈搏)
+                document.getElementById('sys-input').value = sys;
+                document.getElementById('dia-input').value = dia;
+                document.getElementById('pul-input').value = pul;
+                
+                statusDiv.innerText = '✅ 辨識完成！請確認或手動修改下方數值。';
+                statusDiv.style.color = '#2ecc71';
+            } else {
+                statusDiv.innerText = '⚠️ 辨識失敗或畫面不清晰，請手動輸入。';
+                statusDiv.style.color = '#e74c3c';
+            }
+        } catch (error) {
+            statusDiv.innerText = '❌ 辨識發生錯誤，請手動輸入。';
+            statusDiv.style.color = '#e74c3c';
+        }
+    }
+
+    // 儲存紀錄與更新圖表
+    function saveRecord() {
+        const time = document.getElementById('measure-time').value;
+        const dia = document.getElementById('dia-input').value;
+        const sys = document.getElementById('sys-input').value;
+        const pul = document.getElementById('pul-input').value;
+
+        if (!time || !dia || !sys) {
+            alert('請至少填寫時間、舒張壓與收縮壓！');
+            return;
+        }
+
+        const newRecord = {
+            time: time.replace('T', ' '), // 轉成易讀格式
+            dia: parseInt(dia),
+            sys: parseInt(sys),
+            pul: parseInt(pul)
+        };
+
+        records.push(newRecord);
+        // 依時間排序
+        records.sort((a, b) => new Date(a.time) - new Date(b.time));
+        
+        // 存入瀏覽器暫存
+        localStorage.setItem('bp_records', JSON.stringify(records));
+        
+        alert('紀錄已儲存！');
+        
+        // 清空輸入框準備下一次
+        document.getElementById('dia-input').value = '';
+        document.getElementById('sys-input').value = '';
+        document.getElementById('pul-input').value = '';
+        document.getElementById('file-input').value = '';
+        document.getElementById('preview-container').style.display = 'none';
+
+        renderChart();
+    }
+
+    // 8: 繪製紀錄圖表
+    function renderChart() {
+        if (records.length === 0) return;
+
+        const labels = records.map(r => r.time.substring(5, 16)); // 只顯示 月-日 點:分
+        const sysData = records.map(r => r.sys);
+        const diaData = records.map(r => r.dia);
+
+        const ctx = document.getElementById('bpChart').getContext('2d');
+
+        if (bpChartInstance) {
+            bpChartInstance.destroy(); // 避免圖表重疊
+        }
+
+        bpChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: '收縮壓 (Sys)',
+                        data: sysData,
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.2)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true
+                    },
+                    {
+                        label: '舒張壓 (Dia)',
+                        data: diaData,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.2)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        fill: true
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        suggestedMin: 40,
+                        suggestedMax: 180
+                    }
+                }
+            }
+        });
+    }
+
+    // 初始化時先畫圖表
+    renderChart();
+</script>
+
+</body>
+</html>
