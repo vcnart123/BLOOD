@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>血壓記錄小幫手</title>
+    <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 500px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            box-sizing: border-box;
+        }
+        h2 { text-align: center; color: #333; margin-top: 0; }
+        
+        .upload-btn-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+            margin-bottom: 15px;
+        }
+        .btn {
+            border: 2px solid #20b2aa;
+            color: white;
+            background-color: #20b2aa;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            width: 100%;
+            text-align: center;
+            cursor: pointer;
+        }
+        .upload-btn-wrapper input[type=file] {
+            font-size: 100px;
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .editor-section {
+            display: flex;
+            flex-direction: row;
+            gap: 15px;
+            margin-bottom: 20px;
+            align-items: flex-start;
+        }
+        .thumbnail-container {
+            flex: 1;
+            max-width: 40%;
+        }
+        #thumbnail {
+            width: 100%;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            display: none;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-container {
+            flex: 1.5;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+        label {
+            font-size: 13px;
+            color: #555;
+            margin-bottom: 4px;
+            font-weight: bold;
+        }
+        input {
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 16px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .submit-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 5px;
+            font-weight: bold;
+        }
+        .chart-container {
+            margin-top: 20px;
+            width: 100%;
+            height: 300px;
+        }
+
+        /* 針對螢幕極小的手機優化：改為上下排列 */
+        @media (max-width: 380px) {
+            .editor-section { flex-direction: column; }
+            .thumbnail-container { max-width: 100%; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <h2>血壓記錄小幫手</h2>
+
+    <div class="upload-btn-wrapper">
+        <button class="btn">📸 開啟相簿上傳照片</button>
+        <input type="file" id="photo-upload" accept="image/*" />
+    </div>
+
+    <div class="editor-section">
+        <div class="thumbnail-container">
+            <img id="thumbnail" alt="血壓計照片縮圖">
+        </div>
+        <div class="form-container">
+            <form id="bp-form">
+                <div class="input-group">
+                    <label>量測時間 (年/月/日/點/分)</label>
+                    <input type="datetime-local" id="measure-time" required>
+                </div>
+                <div class="input-group">
+                    <label>收縮壓 (高壓)</label>
+                    <input type="number" id="sys" list="sys-options" required placeholder="例如: 120">
+                    <datalist id="sys-options">
+                        <option value="100"><option value="110"><option value="120"><option value="130"><option value="140">
+                    </datalist>
+                </div>
+                <div class="input-group">
+                    <label>舒張壓 (低壓)</label>
+                    <input type="number" id="dia" list="dia-options" required placeholder="例如: 80">
+                    <datalist id="dia-options">
+                        <option value="60"><option value="70"><option value="80"><option value="90"><option value="100">
+                    </datalist>
+                </div>
+                <div class="input-group">
+                    <label>脈搏</label>
+                    <input type="number" id="pulse" list="pulse-options" required placeholder="例如: 75">
+                    <datalist id="pulse-options">
+                        <option value="60"><option value="70"><option value="80"><option value="90"><option value="100">
+                    </datalist>
+                </div>
+                <button type="submit" class="submit-btn">儲存紀錄</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="bpChart"></canvas>
+    </div>
+</div>
+
+<script>
+    let bpRecords = [];
+    let chartInstance = null;
+
+    const uploadInput = document.getElementById('photo-upload');
+    const thumbnail = document.getElementById('thumbnail');
+    const measureTimeInput = document.getElementById('measure-time');
+    const bpForm = document.getElementById('bp-form');
+
+    // 預設時間為當下時間
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    measureTimeInput.value = now.toISOString().slice(0, 16);
+
+    // 處理照片上傳與 EXIF 時間讀取
+    uploadInput.addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // 產生縮圖
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            thumbnail.src = event.target.result;
+            thumbnail.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+
+        // 讀取照片建立時間 (EXIF)
+        EXIF.getData(file, function() {
+            const exifDate = EXIF.getTag(this, "DateTimeOriginal");
+            if (exifDate) {
+                // 將 EXIF 的 "YYYY:MM:DD HH:MM:SS" 轉為 datetime-local 所需的 "YYYY-MM-DDTHH:MM"
+                const parts = exifDate.split(' ');
+                if(parts.length === 2) {
+                    const datePart = parts[0].replace(/:/g, '-');
+                    const timePart = parts[1].substring(0, 5); 
+                    measureTimeInput.value = `${datePart}T${timePart}`;
+                }
+            }
+        });
+    });
+
+    // Chart.js 客製化背景套件 (依日期交替湖水綠與白色)
+    const alternateBackgroundPlugin = {
+        id: 'alternateBackground',
+        beforeDraw: (chart) => {
+            if (!chart.scales.x || !chart.scales.y) return;
+            const ctx = chart.ctx;
+            const xAxis = chart.scales.x;
+            const yAxis = chart.scales.y;
+            const top = yAxis.top;
+            const bottom = yAxis.bottom;
+
+            ctx.save();
+            let currentDateStr = '';
+            let isLakeGreen = true;
+            let startX = xAxis.left;
+
+            const ticks = xAxis.getTicks();
+            
+            for (let i = 0; i < ticks.length; i++) {
+                const tickLabel = xAxis.getLabelForValue(ticks[i].value);
+                const datePart = tickLabel.split(' ')[0]; // 取出日期部分 MM/DD
+
+                if (i === 0) {
+                    currentDateStr = datePart;
+                } else if (datePart !== currentDateStr) {
+                    const endX = xAxis.getPixelForTick(i);
+                    ctx.fillStyle = isLakeGreen ? 'rgba(32, 178, 170, 0.15)' : 'rgba(255, 255, 255, 1)';
+                    ctx.fillRect(startX, top, endX - startX, bottom - top);
+                    
+                    isLakeGreen = !isLakeGreen;
+                    currentDateStr = datePart;
+                    startX = endX;
+                }
+            }
+            // 填滿最後一個區塊
+            ctx.fillStyle = isLakeGreen ? 'rgba(32, 178, 170, 0.15)' : 'rgba(255, 255, 255, 1)';
+            ctx.fillRect(startX, top, xAxis.right - startX, bottom - top);
+            ctx.restore();
+        }
+    };
+
+    // 表單送出處理
+    bpForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        const timeVal = measureTimeInput.value; 
+        const sysVal = parseInt(document.getElementById('sys').value);
+        const diaVal = parseInt(document.getElementById('dia').value);
+
+        if (!timeVal || !sysVal || !diaVal) return;
+
+        // 整理圖表用的 X 軸標籤 (格式：MM/DD HH:mm)
+        const dateObj = new Date(timeVal);
+        const label = `${String(dateObj.getMonth()+1).padStart(2,'0')}/${String(dateObj.getDate()).padStart(2,'0')} ${String(dateObj.getHours()).padStart(2,'0')}:${String(dateObj.getMinutes()).padStart(2,'0')}`;
+
+        bpRecords.push({
+            rawDate: dateObj,
+            label: label,
+            sys: sysVal,
+            dia: diaVal
+        });
+
+        // 依照時間先後順序排列資料
+        bpRecords.sort((a, b) => a.rawDate - b.rawDate);
+
+        updateChart();
+        
+        // 清空血壓數值，保留時間框供下次修改
+        document.getElementById('sys').value = '';
+        document.getElementById('dia').value = '';
+        document.getElementById('pulse').value = '';
+        alert('✅ 紀錄已成功加入圖表！');
+    });
+
+    // 繪製與更新圖表
+    function updateChart() {
+        const ctx = document.getElementById('bpChart').getContext('2d');
+        const labels = bpRecords.map(r => r.label);
+        const sysData = bpRecords.map(r => r.sys);
+        const diaData = bpRecords.map(r => r.dia);
+
+        if (chartInstance) {
+            chartInstance.destroy();
+        }
+
+        chartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: '收縮壓 (高壓)',
+                        data: sysData,
+                        borderColor: '#ff5252',
+                        backgroundColor: '#ff5252',
+                        tension: 0.3,
+                        pointRadius: 5
+                    },
+                    {
+                        label: '舒張壓 (低壓)',
+                        data: diaData,
+                        borderColor: '#448aff',
+                        backgroundColor: '#448aff',
+                        tension: 0.3,
+                        pointRadius: 5
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        min: 40,
+                        max: 200
+                    }
+                },
+                plugins: {
+                    legend: { position: 'top' }
+                }
+            },
+            plugins: [alternateBackgroundPlugin]
+        });
+    }
+    
+    // 初始化空圖表
+    updateChart();
+</script>
+</body>
+</html>
