@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>血壓紀錄</title>
+    <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 10px;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container {
+            display: flex;
+            width: 100%;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        /* 左右各佔 50% */
+        .photo-section, .input-section {
+            width: 50%;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        .photo-section {
+            border-right: 1px solid #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .input-section {
+            display: flex;
+            flex-direction: column;
+            gap: 12px; /* 縱向依序排列的間距 */
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+        }
+        .input-group label {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 4px;
+            color: #555;
+        }
+        /* 寬度適中的輸入框 */
+        input[type="datetime-local"], 
+        input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px; /* 適合手機點擊 */
+            box-sizing: border-box;
+        }
+        .custom-file-upload {
+            border: 1px solid #20B2AA;
+            display: inline-block;
+            padding: 10px 15px;
+            cursor: pointer;
+            background-color: #20B2AA;
+            color: white;
+            border-radius: 4px;
+            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        #thumbnail {
+            margin-top: 15px;
+            max-width: 100%;
+            border-radius: 4px;
+            display: none;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        button:active {
+            background-color: #45a049;
+        }
+        .chart-container {
+            background: #fff;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .export-btn {
+            background-color: #d9534f;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+
+    <datalist id="sysOptions"></datalist>
+    <datalist id="diaOptions"></datalist>
+    <datalist id="pulseOptions"></datalist>
+
+    <div class="container">
+        <div class="photo-section">
+            <label class="custom-file-upload">
+                <input type="file" id="photoInput" accept="image/*">
+                📸 上傳照片
+            </label>
+            <img id="thumbnail" alt="血壓計照片縮圖">
+        </div>
+
+        <div class="input-section">
+            <div class="input-group">
+                <label>量測時間：年/月/日/點/分</label>
+                <input type="datetime-local" id="measureTime">
+            </div>
+            <div class="input-group">
+                <label>收縮壓 (SYS)</label>
+                <input type="number" id="sys" list="sysOptions" placeholder="手動/下拉">
+            </div>
+            <div class="input-group">
+                <label>舒張壓 (DIA)</label>
+                <input type="number" id="dia" list="diaOptions" placeholder="手動/下拉">
+            </div>
+            <div class="input-group">
+                <label>脈搏 (PUL)</label>
+                <input type="number" id="pulse" list="pulseOptions" placeholder="手動/下拉">
+            </div>
+            <button onclick="saveRecord()">💾 儲存紀錄</button>
+        </div>
+    </div>
+
+    <div class="chart-container" id="exportArea">
+        <canvas id="bpChart"></canvas>
+    </div>
+
+    <button class="export-btn" onclick="exportPDF()">📄 匯出圖表 PDF</button>
+
+    <script>
+        let bpChartInstance = null;
+        let records = JSON.parse(localStorage.getItem('bpRecords')) || []; // 每次開啟找舊紀錄延續使用
+
+        // 1. 初始化輔助下拉選單選項 (動態生成)
+        function initDatalists() {
+            let sysHtml = '', diaHtml = '', pulseHtml = '';
+            for(let i = 80; i <= 200; i+=5) sysHtml += `<option value="${i}">`;
+            for(let i = 50; i <= 130; i+=5) diaHtml += `<option value="${i}">`;
+            for(let i = 50; i <= 120; i+=5) pulseHtml += `<option value="${i}">`;
+            document.getElementById('sysOptions').innerHTML = sysHtml;
+            document.getElementById('diaOptions').innerHTML = diaHtml;
+            document.getElementById('pulseOptions').innerHTML = pulseHtml;
+        }
+
+        // 2. 處理照片上傳與時間解析
+        document.getElementById('photoInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // 產生縮圖
+            const thumbnail = document.getElementById('thumbnail');
+            thumbnail.src = URL.createObjectURL(file);
+            thumbnail.style.display = 'block';
+
+            // 使用 EXIF 抓取照片拍攝時間
+            EXIF.getData(file, function() {
+                const dateStr = EXIF.getTag(this, "DateTimeOriginal"); // 格式: "YYYY:MM:DD HH:MM:SS"
+                if (dateStr) {
+                    // 轉換成 datetime-local 所需格式 YYYY-MM-DDTHH:MM
+                    const parts = dateStr.split(" ");
+                    const datePart = parts[0].replace(/:/g, "-");
+                    const timePart = parts[1].substring(0, 5); 
+                    document.getElementById('measureTime').value = `${datePart}T${timePart}`;
+                } else {
+                    // 若無 EXIF，套用現在時間
+                    setNowTime();
+                    alert("這張照片沒有時間紀錄，已自動代入目前時間，可手動修改。");
+                }
+            });
+        });
+
+        // 設定目前時間到輸入框
+        function setNowTime() {
+            const now = new Date();
+            const offset = now.getTimezoneOffset() * 60000;
+            const localISOTime = (new Date(now - offset)).toISOString().slice(0,16);
+            document.getElementById('measureTime').value = localISOTime;
+        }
+
+        // 3. 儲存紀錄
+        function saveRecord() {
+            const timeVal = document.getElementById('measureTime').value;
+            const sysVal = parseInt(document.getElementById('sys').value);
+            const diaVal = parseInt(document.getElementById('dia').value);
+            const pulseVal = parseInt(document.getElementById('pulse').value);
+
+            if (!timeVal || isNaN(sysVal) || isNaN(diaVal) || isNaN(pulseVal)) {
+                alert("請確認所有欄位都有填寫數字！");
+                return;
+            }
+
+            // 格式化時間用於圖表 YYYY/MM/DD HH:mm
+            const dateObj = new Date(timeVal);
+            const formattedTime = `${dateObj.getFullYear()}/${String(dateObj.getMonth()+1).padStart(2,'0')}/${String(dateObj.getDate()).padStart(2,'0')} ${String(dateObj.getHours()).padStart(2,'0')}:${String(dateObj.getMinutes()).padStart(2,'0')}`;
+
+            records.push({
+                time: formattedTime,
+                rawDate: dateObj.toISOString().split('T')[0], // 用於判斷背景顏色
+                timestamp: dateObj.getTime(),
+                sys: sysVal,
+                dia: diaVal,
+                pulse: pulseVal
+            });
+
+            // 依時間排序
+            records.sort((a, b) => a.timestamp - b.timestamp);
+            
+            // 存入 LocalStorage
+            localStorage.setItem('bpRecords', JSON.stringify(records));
+            
+            // 清空輸入並更新圖表
+            document.getElementById('sys').value = '';
+            document.getElementById('dia').value = '';
+            document.getElementById('pulse').value = '';
+            alert("已成功記錄！");
+            updateChart();
+        }
+
+        // 4. 自定義 Chart.js 外掛：依據日期做湖水綠/白色雙色交替背景
+        const alternateBackgroundPlugin = {
+            id: 'alternateBackground',
+            beforeDraw: (chart) => {
+                const {ctx, chartArea: {top, bottom, left, right}, scales: {x}} = chart;
+                if (!records || records.length === 0) return;
+
+                ctx.save();
+                let currentColor = 'rgba(32, 178, 170, 0.15)'; // 湖水綠 (淡色以便看清圖表)
+                const whiteColor = 'rgba(255, 255, 255, 1)';
+                let lastRawDate = records[0].rawDate;
+                let startX = left;
+
+                for (let i = 0; i < records.length; i++) {
+                    const currentRawDate = records[i].rawDate;
+                    if (currentRawDate !== lastRawDate) {
+                        // 日期改變，畫出前一個區塊
+                        const endX = x.getPixelForTick(i);
+                        ctx.fillStyle = currentColor;
+                        ctx.fillRect(startX, top, endX - startX, bottom - top);
+                        
+                        // 切換顏色與日期
+                        currentColor = currentColor === whiteColor ? 'rgba(32, 178, 170, 0.15)' : whiteColor;
+                        lastRawDate = currentRawDate;
+                        startX = endX;
+                    }
+                }
+                // 畫最後一個區塊到底
+                ctx.fillStyle = currentColor;
+                ctx.fillRect(startX, top, right - startX, bottom - top);
+                ctx.restore();
+            }
+        };
+
+        // 5. 更新折線圖
+        function updateChart() {
+            const ctx = document.getElementById('bpChart').getContext('2d');
+            const labels = records.map(r => r.time);
+            const sysData = records.map(r => r.sys);
+            const diaData = records.map(r => r.dia);
+
+            if (bpChartInstance) {
+                bpChartInstance.destroy();
+            }
+
+            bpChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: '收縮壓 (SYS)',
+                            data: sysData,
+                            borderColor: '#e74c3c',
+                            backgroundColor: '#e74c3c',
+                            tension: 0.3,
+                            fill: false
+                        },
+                        {
+                            label: '舒張壓 (DIA)',
+                            data: diaData,
+                            borderColor: '#3498db',
+                            backgroundColor: '#3498db',
+                            tension: 0.3,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        y: {
+                            min: 40,
+                            max: 220,
+                            title: { display: true, text: 'mmHg' }
+                        },
+                        x: {
+                            ticks: { maxRotation: 45, minRotation: 45 }
+                        }
+                    }
+                },
+                plugins: [alternateBackgroundPlugin]
+            });
+        }
+
+        // 6. 匯出 PDF 檔案
+        async function exportPDF() {
+            if (records.length === 0) {
+                alert("目前沒有紀錄可以匯出！");
+                return;
+            }
+            const exportArea = document.getElementById('exportArea');
+            
+            // 使用 html2canvas 將圖表區塊轉成圖片
+            const canvas = await html2canvas(exportArea, { scale: 2 });
+            const imgData = canvas.toDataURL('image/png');
+            
+            // 設定 PDF 為 A4 橫向 (Landscape)，保持長寬比例正常
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF('l', 'mm', 'a4');
+            const pdfWidth = pdf.internal.pageSize.getWidth();
+            const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+            
+            pdf.text("血壓量測紀錄圖表", 14, 15);
+            pdf.addImage(imgData, 'PNG', 0, 20, pdfWidth, pdfHeight);
+            pdf.save('Blood_Pressure_Record.pdf');
+        }
+
+        // 啟動時執行
+        window.onload = function() {
+            initDatalists();
+            setNowTime();
+            if (records.length > 0) {
+                updateChart();
+            }
+        };
+    </script>
+</body>
+</html>
